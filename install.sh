@@ -30,94 +30,8 @@ require_file() {
     [[ -f "$path" ]] || fail "required file not found: $path"
 }
 
-require_cmd() {
-    local cmd="$1"
-    command -v "$cmd" >/dev/null 2>&1 || fail "required command not found: $cmd"
-}
-
-prompt_yes_no() {
-    local prompt="$1"
-    local reply
-
-    if [[ ! -t 0 ]]; then
-        return 1
-    fi
-
-    while true; do
-        read -r -p "$prompt [y/N]: " reply
-        case "$reply" in
-            [Yy]|[Yy][Ee][Ss]) return 0 ;;
-            [Nn]|[Nn][Oo]|"") return 1 ;;
-            *) say "Please answer y or n." ;;
-        esac
-    done
-}
-
-apt_install_package() {
-    local package_name="$1"
-    local feature_text="$2"
-
-    if command -v apt-get >/dev/null 2>&1; then
-        say ""
-        say "Missing package: $package_name"
-        say "Purpose: $feature_text"
-
-        if prompt_yes_no "Install $package_name now?"; then
-            if [[ $APT_UPDATED -eq 0 ]]; then
-                say "Running apt update..."
-                apt-get update
-                APT_UPDATED=1
-            fi
-
-            say "Installing $package_name..."
-            apt-get install -y "$package_name"
-            return 0
-        fi
-
-        fail "$package_name is required for Pi 5 Hardware Monitor. Install it, then re-run this installer."
-    fi
-
-    fail "$package_name is required for Pi 5 Hardware Monitor. Install it, then re-run this installer."
-}
-
-maybe_install_optional_package() {
-    local command_name="$1"
-    local package_name="$2"
-    local feature_text="$3"
-
-    if command -v "$command_name" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    say ""
-    say "Optional package not found: $package_name"
-    say "Feature: $feature_text"
-
-    if command -v apt-get >/dev/null 2>&1 && prompt_yes_no "Install optional package $package_name now?"; then
-        if [[ $APT_UPDATED -eq 0 ]]; then
-            say "Running apt update..."
-            apt-get update
-            APT_UPDATED=1
-        fi
-
-        say "Installing $package_name..."
-        apt-get install -y "$package_name"
-    else
-        say "Skipping optional package $package_name."
-    fi
-}
-
-ensure_required_command() {
-    local command_name="$1"
-    local package_name="$2"
-    local feature_text="$3"
-
-    if command -v "$command_name" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    apt_install_package "$package_name" "$feature_text"
-    command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is still missing after installing $package_name"
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
 
 is_raspberry_pi_5() {
@@ -130,6 +44,68 @@ is_raspberry_pi_5() {
     fi
 
     [[ "$model" == *"Raspberry Pi 5"* ]]
+}
+
+apt_update_once() {
+    if [[ $APT_UPDATED -eq 0 ]]; then
+        say "Running apt update..."
+        apt-get update
+        APT_UPDATED=1
+    fi
+}
+
+install_required_packages() {
+    local packages=("$@")
+
+    [[ ${#packages[@]} -gt 0 ]] || return 0
+
+    command_exists apt-get || fail "apt-get is not available. Install the required packages manually, then re-run this installer."
+
+    say ""
+    say "Installing required packages:"
+    printf '  %s\n' "${packages[@]}"
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt_update_once
+    apt-get install -y "${packages[@]}"
+}
+
+maybe_install_optional_package() {
+    local command_name="$1"
+    local package_name="$2"
+    local feature_text="$3"
+    local reply=""
+
+    if command_exists "$command_name"; then
+        return 0
+    fi
+
+    say ""
+    say "Optional package not found: $package_name"
+    say "Feature: $feature_text"
+
+    if [[ -t 0 ]]; then
+        while true; do
+            read -r -p "Install optional package $package_name now? [y/N]: " reply
+            case "$reply" in
+                [Yy]|[Yy][Ee][Ss])
+                    export DEBIAN_FRONTEND=noninteractive
+                    apt_update_once
+                    apt-get install -y "$package_name"
+                    return 0
+                    ;;
+                [Nn]|[Nn][Oo]|"")
+                    say "Skipping optional package $package_name."
+                    return 0
+                    ;;
+                *)
+                    say "Please answer y or n."
+                    ;;
+            esac
+        done
+    fi
+
+    say "Skipping optional package $package_name because no interactive terminal is available."
 }
 
 if [[ $EUID -ne 0 ]]; then
@@ -148,17 +124,44 @@ if ! is_raspberry_pi_5; then
     fail "Pi 5 Hardware Monitor only supports Raspberry Pi 5 systems. This installer will not continue on non-Pi-5 hardware."
 fi
 
-if ! command -v cockpit-bridge >/dev/null 2>&1; then
+if ! command_exists cockpit-bridge; then
     fail "Cockpit is not installed or cockpit-bridge is missing. Pi 5 Hardware Monitor is a Cockpit plugin and requires Cockpit first."
 fi
 
-ensure_required_command make make "build/install support used by the Cockpit starter-kit Makefile"
-ensure_required_command node nodejs "JavaScript runtime required to build the Cockpit plugin during install"
-ensure_required_command npm npm "package manager required to download and build the Cockpit plugin dependencies"
-ensure_required_command python3 python3 "runtime required by the pi-monitor-history collector script"
-ensure_required_command systemctl systemd "service manager required for the pi-monitor-history service and timer"
+# Required command -> package mapping.
+required_commands=(make node npm python3 systemctl)
+required_packages=(make nodejs npm python3 systemd)
+required_features=(
+    "build/install support used by the Cockpit starter-kit Makefile"
+    "JavaScript runtime required to build the Cockpit plugin during install"
+    "package manager required to download and build the Cockpit plugin dependencies"
+    "runtime required by the pi-monitor-history collector script"
+    "service manager required for the pi-monitor-history service and timer"
+)
 
-if ! command -v vcgencmd >/dev/null 2>&1; then
+missing_packages=()
+missing_features=()
+
+for i in "${!required_commands[@]}"; do
+    if ! command_exists "${required_commands[$i]}"; then
+        missing_packages+=("${required_packages[$i]}")
+        missing_features+=("${required_packages[$i]}: ${required_features[$i]}")
+    fi
+done
+
+if [[ ${#missing_packages[@]} -gt 0 ]]; then
+    say ""
+    say "Missing required dependencies detected:"
+    printf '  %s\n' "${missing_features[@]}"
+    install_required_packages "${missing_packages[@]}"
+fi
+
+# Re-verify every required command after package installation.
+for cmd in "${required_commands[@]}"; do
+    command_exists "$cmd" || fail "required command still not found after package installation: $cmd"
+done
+
+if ! command_exists vcgencmd; then
     fail "vcgencmd is missing. Pi 5 Hardware Monitor needs Raspberry Pi firmware utilities for temperatures, clocks, voltages, and throttling data. Install the package that provides vcgencmd on this system, then re-run this installer."
 fi
 
@@ -167,16 +170,16 @@ maybe_install_optional_package \
     smartmontools \
     "full NVMe SMART health details, including SMART status, SMART temperature, percentage used, power-on hours, unsafe shutdowns, and media/data integrity errors"
 
-# Install the Cockpit plugin using the starter-kit Makefile flow.
+say ""
+say "Building and installing the Cockpit plugin..."
 make -C "$PROJECT_ROOT" install
 
-# Install the history collector and unit files from the current repo copies.
+say "Installing history collector and systemd units..."
 install -m 755 "$HISTORY_SCRIPT_SRC" "$HISTORY_SCRIPT_DST"
 install -m 644 "$SERVICE_SRC" "$SERVICE_DST"
 install -m 644 "$TIMER_SRC" "$TIMER_DST"
 
-# Reload systemd, enable the timer, and force one immediate history sample
-# so a fresh install does not look broken while waiting for the first interval.
+say "Reloading systemd and starting the history timer/service..."
 systemctl daemon-reload
 systemctl enable --now pi-monitor-history.timer
 systemctl start pi-monitor-history.service
