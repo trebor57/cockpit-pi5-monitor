@@ -482,7 +482,7 @@ check_pi5_hardware() {
 }
 
 resolve_plugin_id() {
-  local manifest="$PROJECT_ROOT/manifest.json"
+  local manifest="$PROJECT_ROOT/src/manifest.json"
   local parsed=""
 
   if [[ -f "$manifest" ]]; then
