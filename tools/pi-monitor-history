@@ -21,9 +21,42 @@ RETENTION_SECONDS=$((5 * 24 * 60 * 60))
 mkdir -p "$DATA_DIR"
 [ -f "$HISTORY_FILE" ] || : > "$HISTORY_FILE"
 
-CPU_RAW=$(cat /sys/class/hwmon/hwmon0/temp1_input 2>/dev/null || true)
-NVME_RAW=$(cat /sys/class/hwmon/hwmon1/temp1_input 2>/dev/null || true)
-IO_RAW=$(cat /sys/class/hwmon/hwmon2/temp1_input 2>/dev/null || true)
+CPU_RAW=""
+IO_RAW=""
+NVME_RAW=""
+
+for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+  [ -r "$HWMON_DIR/name" ] || continue
+  NAME=$(cat "$HWMON_DIR/name" 2>/dev/null || true)
+
+  if [ "$NAME" = "cpu_thermal" ]; then
+    CPU_RAW=$(cat "$HWMON_DIR/temp1_input" 2>/dev/null || true)
+  fi
+
+  if [ "$NAME" = "rp1_adc" ]; then
+    IO_RAW=$(cat "$HWMON_DIR/temp1_input" 2>/dev/null || true)
+  fi
+done
+
+if [ -b /dev/nvme0n1 ]; then
+  NVME_RAW=$(
+    (
+      sudo -n smartctl -a /dev/nvme0n1 2>/dev/null ||
+      smartctl -a /dev/nvme0n1 2>/dev/null ||
+      true
+    ) | awk -F: '
+      BEGIN { IGNORECASE=1 }
+      /^[[:space:]]*Temperature[[:space:]]*:/ {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        if (match($2, /[-+]?[0-9]+/)) {
+          printf "%d", substr($2, RSTART, RLENGTH) * 1000
+          exit
+        }
+      }
+    '
+  )
+fi
+
 PMIC_RAW=$(vcgencmd measure_temp pmic 2>/dev/null | sed "s/.*=//; s/'C//" | awk '{printf "%d", $1 * 1000}' || true)
 THROTTLED_RAW=$(vcgencmd get_throttled 2>/dev/null || echo throttled=0x0)
 ROOT_USED_PCT=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}')
