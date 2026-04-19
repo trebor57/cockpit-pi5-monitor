@@ -1054,9 +1054,32 @@ function defaultMonitorState(): MonitorState {
 
 async function readMonitorData(): Promise<MonitorState> {
     const cmd = `
-      echo "CPU=$(cat /sys/class/hwmon/hwmon0/temp1_input 2>/dev/null)"
-      echo "NVME=$(cat /sys/class/hwmon/hwmon1/temp1_input 2>/dev/null)"
-      echo "RP1=$(cat /sys/class/hwmon/hwmon2/temp1_input 2>/dev/null)"
+      CPU_HWMON=$(for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+        [ -r "$HWMON_DIR/name" ] || continue
+        HWMON_NAME=$(cat "$HWMON_DIR/name" 2>/dev/null || true)
+        if [ "$HWMON_NAME" = "cpu_thermal" ]; then
+          echo "$HWMON_DIR"
+          break
+        fi
+      done)
+
+      RP1_HWMON=$(for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+        [ -r "$HWMON_DIR/name" ] || continue
+        HWMON_NAME=$(cat "$HWMON_DIR/name" 2>/dev/null || true)
+        if [ "$HWMON_NAME" = "rp1_adc" ]; then
+          echo "$HWMON_DIR"
+          break
+        fi
+      done)
+
+      if [ -n "$CPU_HWMON" ] && [ -r "$CPU_HWMON/temp1_input" ]; then
+        echo "CPU=$(cat "$CPU_HWMON/temp1_input" 2>/dev/null)"
+      fi
+
+      if [ -n "$RP1_HWMON" ] && [ -r "$RP1_HWMON/temp1_input" ]; then
+        echo "RP1=$(cat "$RP1_HWMON/temp1_input" 2>/dev/null)"
+      fi
+
       echo "PMIC_TEMP=$(vcgencmd measure_temp pmic 2>/dev/null | sed "s/.*=//; s/'C//" | awk '{printf "%d", $1 * 1000}')"
 
       FAN_VALUE=""
@@ -1132,7 +1155,7 @@ async function readMonitorData(): Promise<MonitorState> {
         echo "ROOTFS_USED_PCT=$(printf '%s\\n' "$ROOT_DF_LINE" | cut -d'|' -f3)"
       fi
 
-      [ -e /sys/class/hwmon/hwmon1/temp1_input ] && echo "NVME_PRESENT=1"
+      [ -b /dev/nvme0n1 ] && echo "NVME_PRESENT=1"
       [ "$FAN_FOUND" -eq 1 ] || [ "$PWM_FOUND" -eq 1 ] && echo "FAN_PRESENT=1"
 
       echo "PI_MODEL=$(tr -d '\\0' </proc/device-tree/model 2>/dev/null)"
@@ -1340,7 +1363,7 @@ async function readMonitorData(): Promise<MonitorState> {
     return {
         thermal: {
             cpuTemp: formatTemp(data.CPU || ""),
-            nvmeTemp: data.NVME ? formatTemp(data.NVME) : "--",
+            nvmeTemp: data.NVME_PRESENT === "1" ? nvmeSmartTemp : "--",
             ioTemp: formatTemp(data.RP1 || ""),
             pmicTemp: data.PMIC_TEMP ? formatTemp(data.PMIC_TEMP) : "--",
             fanRpm: data.FAN ? formatRpm(data.FAN) : "--",
@@ -1609,8 +1632,8 @@ export const Application = () => {
         }, 0);
     }, [isHistorySampleOpen, selectedHistorySampleKey]);
 
-    const showNvmeDependentItems = visibleSections.nvme;
-    const showPcieSection = visibleSections.nvme && visibleSections.pcie;
+    const showNvmeDependentItems = visibleSections.nvme && monitor.boot.nvmePresent === "Yes";
+    const showPcieSection = visibleSections.nvme && visibleSections.pcie && monitor.boot.nvmePresent === "Yes";
     const showFanCard = monitor.thermal.fanRpm !== "--" || monitor.thermal.fanPwm !== "--";
     const showUsbStorageSection = monitor.usbStorage.present === "Yes";
     const selectedHistoryDay = historyDays.find(day => day.dayKey === selectedHistoryDayKey) || null;
