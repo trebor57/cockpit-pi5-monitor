@@ -26,7 +26,8 @@
 /node_modules/
 /runtime-npm-modules.txt
 /tmp/
-/tools/
+/tools/*
+!tools/pi-monitor-history
 
 # subdirs (/subdir/...)
 /packaging/arch/PKGBUILD
