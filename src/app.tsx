@@ -2265,7 +2265,7 @@ export const Application = () => {
                         )}
 
                         {/* NVMe Drive section: drive identity, SMART health, and mount point. */}
-                        {visibleSections.nvme && (
+                        {showNvmeDependentItems && (
                             <>
                                 <Content>
                                     <Title headingLevel="h2">NVMe Drive</Title>
