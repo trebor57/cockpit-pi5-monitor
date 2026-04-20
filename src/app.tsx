@@ -1528,13 +1528,15 @@ export const Application = () => {
         });
 
     /*
-     * Live refresh loop for both current sensor data and history summaries.
-     * Keeps the UI updated while also tracking whether live reads are online.
+     * Fast live refresh loop for current sensor data only.
+     * Keeps the live cards responsive and tracks live online/offline state
+     * without waiting on history reads.
      */
     useEffect(() => {
         let cancelled = false;
         let lastSnapshot = "";
         let stallTimer: number | undefined;
+        let refreshTimer: number | undefined;
 
         const markOnline = () => {
             if (cancelled) return;
@@ -1548,31 +1550,85 @@ export const Application = () => {
                 if (!cancelled) {
                     setLiveDataOnline(false);
                 }
-            }, 2500);
+            }, 5000);
+        };
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshLoop().catch(() => undefined);
+                }
+            }, delayMs);
         };
 
         const refreshLoop = async (): Promise<void> => {
             try {
-                const [data, historyView] = await Promise.all([
-                    readMonitorData(),
-                    readHistoryView(),
-                ]);
+                const data = await readMonitorData();
                 if (cancelled) return;
 
-                const combined = {
-                    ...data,
-                    history: historyView.summary,
-                };
-                const snapshot = JSON.stringify({
-                    combined,
-                    historyDays: historyView.days,
-                    historySamples: historyView.samples,
-                    nodeTimeZone: historyView.timeZone,
-                });
+                const snapshot = JSON.stringify(data);
 
                 if (snapshot !== lastSnapshot) {
                     lastSnapshot = snapshot;
-                    setMonitor(combined);
+                    setMonitor(prev => ({
+                        ...data,
+                        history: prev.history,
+                    }));
+                }
+
+                markOnline();
+                scheduleRefresh(250);
+            } catch {
+                if (cancelled) return;
+
+                setLiveDataOnline(false);
+                scheduleRefresh(1000);
+            }
+        };
+
+        refreshLoop().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            if (stallTimer !== undefined) {
+                window.clearTimeout(stallTimer);
+            }
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
+            }
+        };
+    }, []);
+
+    /*
+     * Slower history refresh loop for NDJSON summaries and selections.
+     * This avoids repeated history file reads on the fast live sensor loop.
+     */
+    useEffect(() => {
+        let cancelled = false;
+        let lastSnapshot = "";
+        let refreshTimer: number | undefined;
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshHistoryLoop().catch(() => undefined);
+                }
+            }, delayMs);
+        };
+
+        const refreshHistoryLoop = async (): Promise<void> => {
+            try {
+                const historyView = await readHistoryView();
+                if (cancelled) return;
+
+                const snapshot = JSON.stringify(historyView);
+
+                if (snapshot !== lastSnapshot) {
+                    lastSnapshot = snapshot;
+                    setMonitor(prev => ({
+                        ...prev,
+                        history: historyView.summary,
+                    }));
                     setHistoryDays(historyView.days);
                     setHistorySamples(historyView.samples);
                     setNodeTimeZone(historyView.timeZone);
@@ -1588,32 +1644,20 @@ export const Application = () => {
                     });
                 }
 
-                markOnline();
-
-                window.setTimeout(() => {
-                    if (!cancelled) {
-                        refreshLoop().catch(() => undefined);
-                    }
-                }, 250);
+                scheduleRefresh(30000);
             } catch {
                 if (cancelled) return;
 
-                setLiveDataOnline(false);
-
-                window.setTimeout(() => {
-                    if (!cancelled) {
-                        refreshLoop().catch(() => undefined);
-                    }
-                }, 1000);
+                scheduleRefresh(30000);
             }
         };
 
-        refreshLoop().catch(() => undefined);
+        refreshHistoryLoop().catch(() => undefined);
 
         return () => {
             cancelled = true;
-            if (stallTimer !== undefined) {
-                window.clearTimeout(stallTimer);
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
             }
         };
     }, []);
