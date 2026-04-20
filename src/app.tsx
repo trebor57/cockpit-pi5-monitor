@@ -435,6 +435,12 @@ function cleanNvmeCounterValue(raw: string) {
     return match[0].replace(/[^\d]/g, "");
 }
 
+function displayNvmeField(val: string, nvmePresent: string) {
+    if (nvmePresent !== "1") return "--";
+    if (!val || val === "--") return "Not Reported";
+    return val;
+}
+
 function formatHours(raw: string) {
     const sanitized = cleanNvmeCounterValue(raw);
     const n = Number(sanitized);
@@ -495,11 +501,16 @@ function classifyBootDevice(rootDevice: string) {
     return "Other";
 }
 
-function parseSmartValue(raw: string, key: string) {
+function parseSmartValue(raw: string, ...keys: string[]) {
     if (!raw) return "--";
-    const re = new RegExp(`^\\s*${key}\\s*:\\s*(.+)$`, "mi");
-    const m = raw.match(re);
-    return m ? m[1].trim() : "--";
+
+    for (const key of keys) {
+        const re = new RegExp(`^\\s*${key}\\s*:\\s*(.+)$`, "mi");
+        const m = raw.match(re);
+        if (m) return m[1].trim();
+    }
+
+    return "--";
 }
 
 function parseSmartHealth(raw: string) {
@@ -1361,10 +1372,13 @@ async function readMonitorData(): Promise<MonitorState> {
     const nvmeSmartRaw = nvmeSmartLines.join("\n");
     const nvmeHealth = parseSmartHealth(nvmeSmartRaw);
     const nvmeSmartTemp = cleanNvmeTemp(parseSmartValue(nvmeSmartRaw, "Temperature", "temperature"));
-    const nvmePercentageUsed =
-        parseSmartValue(nvmeSmartRaw, "Percentage Used", "percentage_used") !== "--"
-            ? parseSmartValue(nvmeSmartRaw, "Percentage Used", "percentage_used")
-            : parseSmartValue(nvmeSmartRaw, "Percentage Used Endurance Indicator");
+    let percUsedRaw = parseSmartValue(nvmeSmartRaw, "Percentage Used", "percentage_used");
+
+    if (percUsedRaw === "--") {
+        percUsedRaw = parseSmartValue(nvmeSmartRaw, "Percentage Used Endurance Indicator");
+    }
+
+    const nvmePercentageUsed = percUsedRaw !== "--" ? percUsedRaw : "--";
     const nvmePowerOnHours = formatHours(parseSmartValue(nvmeSmartRaw, "Power On Hours", "power_on_hours"));
     const nvmeUnsafeShutdowns = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Unsafe Shutdowns", "unsafe_shutdowns"));
     const nvmeMediaErrors = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Media and Data Integrity Errors", "media_errors"));
@@ -1425,10 +1439,10 @@ async function readMonitorData(): Promise<MonitorState> {
             health: nvmeHealth,
             healthDetail: nvmeHealth !== "--" ? "SMART status" : "--",
             smartTemp: nvmeSmartTemp,
-            percentageUsed: nvmePercentageUsed,
-            powerOnHours: nvmePowerOnHours,
-            unsafeShutdowns: nvmeUnsafeShutdowns,
-            mediaErrors: nvmeMediaErrors,
+            percentageUsed: displayNvmeField(nvmePercentageUsed, data.NVME_PRESENT),
+            powerOnHours: displayNvmeField(nvmePowerOnHours, data.NVME_PRESENT),
+            unsafeShutdowns: displayNvmeField(nvmeUnsafeShutdowns, data.NVME_PRESENT),
+            mediaErrors: displayNvmeField(nvmeMediaErrors, data.NVME_PRESENT),
             mountedAt: data.NVME_MOUNT_POINT || "--",
         },
         sd: {
