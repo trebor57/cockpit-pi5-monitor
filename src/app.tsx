@@ -426,10 +426,29 @@ function formatCpuFreq(rawKHz: string) {
     return `${mhz.toFixed(0)} MHz`;
 }
 
+function cleanNvmeCounterValue(raw: string) {
+    if (!raw || raw === "--") return "";
+
+    const match = raw.match(/[\d][\d\s,.'%]*/);
+    if (!match) return "";
+
+    return match[0].replace(/[^\d]/g, "");
+}
+
 function formatHours(raw: string) {
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return "--";
+    const sanitized = cleanNvmeCounterValue(raw);
+    const n = Number(sanitized);
+
+    if (!Number.isFinite(n) || sanitized === "") return "--";
     return `${Math.round(n).toLocaleString()} h`;
+}
+
+function formatNvmeCounter(raw: string) {
+    const sanitized = cleanNvmeCounterValue(raw);
+    const n = Number(sanitized);
+
+    if (!Number.isFinite(n) || sanitized === "") return "--";
+    return Math.round(n).toLocaleString();
 }
 
 function formatMilliAmps(raw: string) {
@@ -1347,8 +1366,8 @@ async function readMonitorData(): Promise<MonitorState> {
             ? parseSmartValue(nvmeSmartRaw, "Percentage Used", "percentage_used")
             : parseSmartValue(nvmeSmartRaw, "Percentage Used Endurance Indicator");
     const nvmePowerOnHours = formatHours(parseSmartValue(nvmeSmartRaw, "Power On Hours", "power_on_hours"));
-    const nvmeUnsafeShutdowns = parseSmartValue(nvmeSmartRaw, "Unsafe Shutdowns", "unsafe_shutdowns");
-    const nvmeMediaErrors = parseSmartValue(nvmeSmartRaw, "Media and Data Integrity Errors", "media_errors");
+    const nvmeUnsafeShutdowns = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Unsafe Shutdowns", "unsafe_shutdowns"));
+    const nvmeMediaErrors = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Media and Data Integrity Errors", "media_errors"));
 
     const coreV = extractNumericValue(data.PMIC_CORE_V || "");
     const coreA = extractNumericValue(data.PMIC_CORE_A || "");
