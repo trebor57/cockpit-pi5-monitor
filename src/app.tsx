@@ -527,11 +527,18 @@ function classifyBootDevice(rootDevice: string) {
     return "Other";
 }
 
+function buildSmartKeyPattern(key: string) {
+    return key
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            .replace(/\s+/g, "\\\\s+");
+}
+
 function parseSmartValue(raw: string, ...keys: string[]) {
     if (!raw) return "--";
 
     for (const key of keys) {
-        const re = new RegExp(`^\\s*${key}\\s*:\\s*(.+)$`, "mi");
+        const keyPattern = buildSmartKeyPattern(key);
+        const re = new RegExp(`^\\s*${keyPattern}\\s*[:=]\\s*(.+)$`, "mi");
         const m = raw.match(re);
         if (m) return m[1].trim();
     }
@@ -539,15 +546,39 @@ function parseSmartValue(raw: string, ...keys: string[]) {
     return "--";
 }
 
+function parseSmartInt(raw: string, ...keys: string[]) {
+    const value = parseSmartValue(raw, ...keys);
+    if (value === "--") return NaN;
+
+    const match = value.match(/[-+]?\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : NaN;
+}
+
+function formatSmartPercent(raw: string) {
+    if (!raw || raw === "--") return "--";
+
+    const match = raw.match(/[-+]?\d+(?:\.\d+)?/);
+    if (!match) return "--";
+
+    return `${Math.round(Number(match[0]))}%`;
+}
+
 function parseSmartHealth(raw: string) {
-    const val = parseSmartValue(raw, "SMART overall-health self-assessment test result");
-    if (val !== "--") return val;
+    const direct = parseSmartValue(
+        raw,
+        "SMART overall-health self-assessment test result",
+        "SMART Health Status",
+        "overall-health self-assessment test result",
+        "health status",
+        "drive health",
+        "smart_status"
+    );
+    if (direct !== "--") return direct;
 
-    const val2 = parseSmartValue(raw, "SMART Health Status");
-    if (val2 !== "--") return val2;
-
-    const val3 = parseSmartValue(raw, "SMART overall-health self-assessment test result:");
-    if (val3 !== "--") return val3;
+    const criticalWarning = parseSmartInt(raw, "critical_warning", "critical warning");
+    if (Number.isFinite(criticalWarning)) {
+        return criticalWarning === 0 ? "Healthy" : `Warning (${criticalWarning})`;
+    }
 
     return "--";
 }
@@ -555,10 +586,23 @@ function parseSmartHealth(raw: string) {
 function cleanNvmeTemp(raw: string) {
     if (!raw || raw === "--") return "--";
 
-    const m = raw.match(/([-+]?\d+(?:\.\d+)?)\s+Celsius/i);
-    if (!m) return raw;
+    const celsiusMatch = raw.match(/([-+]?\d+(?:\.\d+)?)\s*(?:°\s*)?C(?:elsius)?\b/i);
+    if (celsiusMatch) {
+        return formatTemp(String(Number(celsiusMatch[1]) * 1000));
+    }
 
-    return formatTemp(String(Number(m[1]) * 1000));
+    const kelvinMatch = raw.match(/([-+]?\d+(?:\.\d+)?)\s*K(?:elvin)?\b/i);
+    if (kelvinMatch) {
+        const celsius = Number(kelvinMatch[1]) - 273.15;
+        return formatTemp(String(Math.round(celsius * 1000)));
+    }
+
+    const plainNumberMatch = raw.match(/[-+]?\d+(?:\.\d+)?/);
+    if (plainNumberMatch) {
+        return formatTemp(String(Number(plainNumberMatch[0]) * 1000));
+    }
+
+    return raw;
 }
 
 function decodeSdVendor(raw: string) {
@@ -1397,17 +1441,44 @@ async function readMonitorData(): Promise<MonitorState> {
 
     const nvmeSmartRaw = nvmeSmartLines.join("\n");
     const nvmeHealth = parseSmartHealth(nvmeSmartRaw);
-    const nvmeSmartTemp = cleanNvmeTemp(parseSmartValue(nvmeSmartRaw, "Temperature", "temperature"));
-    let percUsedRaw = parseSmartValue(nvmeSmartRaw, "Percentage Used", "percentage_used");
+    const nvmeSmartTemp = cleanNvmeTemp(parseSmartValue(
+        nvmeSmartRaw,
+        "Composite Temperature",
+        "Temperature",
+        "temperature",
+        "Current Drive Temperature",
+        "Temperature Sensor 1",
+        "temperature_sensor_1"
+    ));
+    const percUsedRaw = parseSmartValue(
+        nvmeSmartRaw,
+        "Percentage Used",
+        "percentage_used",
+        "Percentage Used Endurance Indicator",
+        "Endurance Used",
+        "endurance_used"
+    );
 
-    if (percUsedRaw === "--") {
-        percUsedRaw = parseSmartValue(nvmeSmartRaw, "Percentage Used Endurance Indicator");
-    }
-
-    const nvmePercentageUsed = percUsedRaw !== "--" ? percUsedRaw : "--";
-    const nvmePowerOnHours = formatHours(parseSmartValue(nvmeSmartRaw, "Power On Hours", "power_on_hours"));
-    const nvmeUnsafeShutdowns = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Unsafe Shutdowns", "unsafe_shutdowns"));
-    const nvmeMediaErrors = formatNvmeCounter(parseSmartValue(nvmeSmartRaw, "Media and Data Integrity Errors", "media_errors"));
+    const nvmePercentageUsed = formatSmartPercent(percUsedRaw);
+    const nvmePowerOnHours = formatHours(parseSmartValue(
+        nvmeSmartRaw,
+        "Power On Hours",
+        "Power-On Hours",
+        "power_on_hours",
+        "Power on Hours"
+    ));
+    const nvmeUnsafeShutdowns = formatNvmeCounter(parseSmartValue(
+        nvmeSmartRaw,
+        "Unsafe Shutdowns",
+        "unsafe_shutdowns",
+        "Unsafe Shutdown Count"
+    ));
+    const nvmeMediaErrors = formatNvmeCounter(parseSmartValue(
+        nvmeSmartRaw,
+        "Media and Data Integrity Errors",
+        "media_errors",
+        "Media Errors"
+    ));
     const nvmePermissionRequired =
         detectPermissionIssue(nvmeSmartRaw) &&
         nvmeHealth === "--" &&
@@ -1490,7 +1561,7 @@ async function readMonitorData(): Promise<MonitorState> {
 
             healthDetail: nvmePermissionRequired
                 ? "Permission Required"
-                : (nvmeHealth !== "--" ? "SMART status" : "Not Reported"),
+                : (nvmeHealth !== "--" ? "Drive health (SMART)" : "Not Reported"),
 
             smartTemp: displayNvmeSmartField(
                 nvmeSmartTemp,
@@ -1502,7 +1573,6 @@ async function readMonitorData(): Promise<MonitorState> {
                 const nvmePresent = formatYesNoFromZeroOne(data.NVME_PRESENT || "0");
 
                 if (nvmePresent !== "Yes") return "Not Available";
-                if (isBlank(data.NVME_MOUNT_POINT)) return "Not Mounted";
                 if (nvmePermissionRequired) return "Permission Required";
                 if (isBlank(nvmePercentageUsed)) return "Not Reported";
 
@@ -1873,7 +1943,7 @@ export const Application = () => {
                             <FlexItem flex={{ default: "flex_1" }}>
                                 <Title headingLevel="h1">Raspberry Pi 5 Hardware Monitor</Title>
                                 <Content component={ContentVariants.p}>
-                                    Ver. 2.4 - April 20, 2026
+                                    Ver. 2.5 - April 21, 2026
                                 </Content>
                             </FlexItem>
 
@@ -1886,7 +1956,7 @@ export const Application = () => {
                                         <Title headingLevel="h3">
                                             <span>Live Sensor Data</span>
                                             <br />
-                                            <span>{liveDataOnline ? "Online" : "Offline"}</span>
+                                            <span>{liveDataOnline ? "Online" : "Waiting for data…"}</span>
                                         </Title>
                                     </CardBody>
                                 </Card>
@@ -2053,8 +2123,12 @@ export const Application = () => {
                                     </Card>
                                     <Card isCompact>
                                         <CardBody>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">History Available</Title>
-                                            <Title headingLevel="h3">{monitor.history.available}</Title>
+                                            <Title headingLevel="h4" size="md" className="pi-card-label">
+                                                {monitor.history.available === "No" ? "History Status" : "History Available"}
+                                            </Title>
+                                            <Title headingLevel="h3">
+                                                {monitor.history.available === "No" ? "Collecting data…" : monitor.history.available}
+                                            </Title>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
