@@ -31,6 +31,8 @@
 }
 
 .pi-last-update-card .pf-v6-c-card__body {
+  justify-content: center;
+  align-items: center;
   text-align: center;
 }
 
@@ -72,6 +74,8 @@
  * Shared compact-card content alignment and card label sizing.
  */
 .pi-card-service-like .pf-v6-c-card.pf-m-compact > .pf-v6-c-card__body {
+  justify-content: center;
+  align-items: center;
   text-align: center;
 }
 
@@ -99,5 +103,72 @@
 }
 
 .pi-live-data-card .pf-v6-c-card__body {
+  justify-content: center;
+  align-items: center;
   text-align: center;
+}
+
+/*
+ * Shared metric-card typography and centering
+ * First-pass consistency fix only.
+ */
+
+.pi-card-service-like .pf-v6-c-card.pf-m-compact > .pf-v6-c-card__body,
+.pi-metric-card-body,
+.pi-dual-metric-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  min-height: 100%;
+}
+
+.pi-card-label {
+  font-size: var(--pf-t--global--font--size--md);
+  line-height: 1.2;
+  margin: 0 0 0.9rem;
+  white-space: nowrap;
+}
+
+.pi-metric-value,
+.pi-card-service-like .pf-v6-c-card.pf-m-compact > .pf-v6-c-card__body > .pf-v6-c-title:not(.pi-card-label) {
+  font-size: var(--pf-t--global--font--size--lg);
+  line-height: 1.2;
+  margin: 0;
+}
+
+.pi-metric-detail {
+  margin-top: 0.9rem;
+  text-align: center;
+}
+
+.pi-dual-metric-card {
+  gap: 0.9rem;
+}
+
+.pi-dual-metric-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.pi-range-line {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.45rem;
+  flex-wrap: nowrap;
+}
+
+.pi-range-value,
+.pi-inline-metric-label {
+  white-space: nowrap;
+}
+
+.pi-inline-metric-label {
+  font-size: var(--pf-t--global--font--size--body--sm);
+  line-height: 1;
 }

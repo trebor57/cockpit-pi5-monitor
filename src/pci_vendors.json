@@ -1,0 +1,150 @@
+[
+  {
+    "vendor": "025e",
+    "vendor_name": "Solidigm"
+  },
+  {
+    "vendor": "101c",
+    "vendor_name": "Western Digital"
+  },
+  {
+    "vendor": "1042",
+    "vendor_name": "Micron"
+  },
+  {
+    "vendor": "106c",
+    "vendor_name": "Hynix Semiconductor"
+  },
+  {
+    "vendor": "1099",
+    "vendor_name": "Samsung"
+  },
+  {
+    "vendor": "1179",
+    "vendor_name": "Toshiba Corporation"
+  },
+  {
+    "vendor": "11ab",
+    "vendor_name": "Marvell"
+  },
+  {
+    "vendor": "126f",
+    "vendor_name": "Silicon Motion, Inc."
+  },
+  {
+    "vendor": "144d",
+    "vendor_name": "Samsung"
+  },
+  {
+    "vendor": "1458",
+    "vendor_name": "Gigabyte"
+  },
+  {
+    "vendor": "1462",
+    "vendor_name": "MSI"
+  },
+  {
+    "vendor": "15b7",
+    "vendor_name": "Sandisk Corp"
+  },
+  {
+    "vendor": "17aa",
+    "vendor_name": "Lenovo"
+  },
+  {
+    "vendor": "196e",
+    "vendor_name": "PNY"
+  },
+  {
+    "vendor": "197b",
+    "vendor_name": "JMicron"
+  },
+  {
+    "vendor": "1987",
+    "vendor_name": "Phison"
+  },
+  {
+    "vendor": "1aed",
+    "vendor_name": "SanDisk"
+  },
+  {
+    "vendor": "1b1c",
+    "vendor_name": "Corsair"
+  },
+  {
+    "vendor": "1b96",
+    "vendor_name": "Western Digital"
+  },
+  {
+    "vendor": "1bb1",
+    "vendor_name": "Seagate Technology PLC"
+  },
+  {
+    "vendor": "1bcd",
+    "vendor_name": "Apacer Technology"
+  },
+  {
+    "vendor": "1c5c",
+    "vendor_name": "SK hynix"
+  },
+  {
+    "vendor": "1cc1",
+    "vendor_name": "ADATA"
+  },
+  {
+    "vendor": "1cfa",
+    "vendor_name": "Corsair Memory, Inc"
+  },
+  {
+    "vendor": "1d49",
+    "vendor_name": "Lenovo"
+  },
+  {
+    "vendor": "1d79",
+    "vendor_name": "Transcend"
+  },
+  {
+    "vendor": "1d97",
+    "vendor_name": "Longsys"
+  },
+  {
+    "vendor": "1dbe",
+    "vendor_name": "INNOGRIT Corporation"
+  },
+  {
+    "vendor": "1dee",
+    "vendor_name": "Biwin Storage"
+  },
+  {
+    "vendor": "1e0f",
+    "vendor_name": "KIOXIA Corporation"
+  },
+  {
+    "vendor": "1e4b",
+    "vendor_name": "Maxio"
+  },
+  {
+    "vendor": "1f31",
+    "vendor_name": "Nextorage"
+  },
+  {
+    "vendor": "1f40",
+    "vendor_name": "Netac"
+  },
+  {
+    "vendor": "2646",
+    "vendor_name": "Kingston"
+  },
+  {
+    "vendor": "7377",
+    "vendor_name": "Colorful"
+  },
+  {
+    "vendor": "8086",
+    "vendor_name": "Intel Corporation"
+  },
+  {
+    "vendor": "c0a9",
+    "vendor_name": "Micron/Crucial"
+  }
+]

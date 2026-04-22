@@ -4,6 +4,7 @@
  * Copyright (C) 2026 Jeff Milne - KE2HNI
  */
 import React, { useEffect, useRef, useState } from 'react';
+import pciVendorEntries from './pci_vendors.json';
 
 /*
  * Main Cockpit/React UI dependencies used by the Pi 5 Hardware Monitor page.
@@ -70,6 +71,7 @@ type BootState = {
 };
 
 type NvmeState = {
+    pciVendorCode: string;
     model: string;
     capacity: string;
     firmware: string;
@@ -605,35 +607,70 @@ function cleanNvmeTemp(raw: string) {
     return raw;
 }
 
+function parsePciVendorCode(raw: string) {
+    if (!raw || raw === "--") return "";
+
+    const match = raw.match(/0x([0-9a-fA-F]{4})/i);
+    return match ? match[1].toLowerCase() : "";
+}
+
+type PciVendorEntry = {
+    vendor?: string;
+    vendor_name?: string;
+};
+
+function normalizePciVendorName(raw: string) {
+    if (!raw) return "Unknown Vendor";
+
+    return raw
+            .replace(/\s*\((?:wrong id|Wrong ID)\)\s*/g, "")
+            .replace(/\s+/g, " ")
+            .trim() || "Unknown Vendor";
+}
+
 function decodeSdVendor(raw: string) {
     const v = (raw || "").trim().toUpperCase();
 
     const vendors: Record<string, string> = {
-        "0X000000": "Gigastone",
+        "0X000000": "Generic",
         "0X000001": "Panasonic",
-        "0X000002": "Toshiba",
+        "0X000002": "Kioxia",
         "0X000003": "SanDisk",
-        "0X000006": "SanDisk Extreme Pro",
+        "0X000005": "STMicro",
+        "0X000006": "SanDisk",
+        "0X000009": "ATP",
         "0X00000B": "Toshiba",
-        "0X000013": "SanDisk/WD",
+        "0X000012": "Patriot",
+        "0X000013": "SanDisk",
         "0X000014": "Samsung",
-        "0X00001B": "Kingston/Samsung",
-        "0X00001D": "ADATA/Transcend",
+        "0X00001B": "Kingston",
+        "0X00001D": "ADATA",
         "0X000024": "Lexar",
-        "0X000027": "Phison/Sony",
+        "0X000027": "Phison",
         "0X000028": "Lexar",
-        "0X000031": "Silicon Power",
+        "0X000031": "SiliconPower",
         "0X000041": "Kingston",
+        "0X000045": "TeamGroup",
+        "0X000056": "SanDian",
         "0X00005C": "Lexar",
-        "0X000074": "Transcend/ADATA",
+        "0X00006F": "Netac",
+        "0X000074": "Transcend",
         "0X000076": "PNY",
-        "0X000082": "Sony/Silicon Power",
-        "0X000089": "Intel/Kingston Canvas Select Plus",
+        "0X000082": "Sony",
+        "0X000089": "Intel",
         "0X000090": "Strontium",
         "0X000092": "Verbatim",
         "0X00009B": "Patriot",
         "0X00009C": "Lexar",
-        "0X0000B6": "Delkin Devices",
+        "0X00009F": "Kingston",
+        "0X0000AD": "Longsys",
+        "0X0000B6": "Delkin",
+        "0X0000C4": "Kootion",
+        "0X0000C9": "Kodak",
+        "0X0000DF": "Lenovo",
+        "0X0000F2": "MK",
+        "0X0000FE": "Generic",
+        "0X0000FF": "Lenovo",
     };
 
     if (!v) return "--";
@@ -1089,6 +1126,7 @@ function defaultMonitorState(): MonitorState {
             fanPresent: "--",
         },
         nvme: {
+            pciVendorCode: "",
             model: "--",
             capacity: "--",
             firmware: "--",
@@ -1289,6 +1327,12 @@ async function readMonitorData(): Promise<MonitorState> {
         [ -r /sys/class/nvme/nvme0/firmware_rev ] && echo "NVME_FIRMWARE=$(cat /sys/class/nvme/nvme0/firmware_rev 2>/dev/null)"
         [ -r /sys/class/block/nvme0n1/size ] && echo "NVME_SIZE_BYTES=$(awk '{print $1 * 512}' /sys/class/block/nvme0n1/size 2>/dev/null)"
 
+        NVME_PCI_VENDOR_ID=$(sudo -n smartctl -a /dev/nvme0n1 2>/dev/null | awk -F: '$1 == "PCI Vendor/Subsystem ID" {gsub(/^[ \t]+/, "", $2); print $2; exit}')
+        if [ -z "$NVME_PCI_VENDOR_ID" ]; then
+          NVME_PCI_VENDOR_ID=$(smartctl -a /dev/nvme0n1 2>/dev/null | awk -F: '$1 == "PCI Vendor/Subsystem ID" {gsub(/^[ \t]+/, "", $2); print $2; exit}')
+        fi
+        [ -n "$NVME_PCI_VENDOR_ID" ] && echo "NVME_PCI_VENDOR_ID=$NVME_PCI_VENDOR_ID"
+
         NVME_MOUNT_DEV=$(findmnt -rn -o SOURCE | grep -E '^/dev/nvme0n1p[0-9]+$' | head -n1 || true)
         if [ -n "$NVME_MOUNT_DEV" ]; then
           NVME_MOUNT_POINT=$(findmnt -rn -S "$NVME_MOUNT_DEV" -o TARGET | head -n1 || true)
@@ -1440,6 +1484,7 @@ async function readMonitorData(): Promise<MonitorState> {
             : NaN;
 
     const nvmeSmartRaw = nvmeSmartLines.join("\n");
+    const nvmeVendorCode = parsePciVendorCode(data.NVME_PCI_VENDOR_ID || "");
     const nvmeHealth = parseSmartHealth(nvmeSmartRaw);
     const nvmeSmartTemp = cleanNvmeTemp(parseSmartValue(
         nvmeSmartRaw,
@@ -1538,6 +1583,8 @@ async function readMonitorData(): Promise<MonitorState> {
             fanPresent: formatYesNoFromZeroOne(data.FAN_PRESENT || "0"),
         },
         nvme: {
+            pciVendorCode: nvmeVendorCode,
+
             model: displayStorageHardwareField(
                 data.NVME_MODEL,
                 formatYesNoFromZeroOne(data.NVME_PRESENT || "0")
@@ -1561,7 +1608,7 @@ async function readMonitorData(): Promise<MonitorState> {
 
             healthDetail: nvmePermissionRequired
                 ? "Permission Required"
-                : (nvmeHealth !== "--" ? "Drive health (SMART)" : "Not Reported"),
+                : (nvmeHealth !== "--" ? "Current SMART Status" : "Not Reported"),
 
             smartTemp: displayNvmeSmartField(
                 nvmeSmartTemp,
@@ -1712,6 +1759,7 @@ async function readMonitorData(): Promise<MonitorState> {
 export const Application = () => {
     const [liveDataOnline, setLiveDataOnline] = useState(false);
     const [monitor, setMonitor] = useState<MonitorState>(defaultMonitorState());
+    const [pciVendorLookup, setPciVendorLookup] = useState<Record<string, string>>({});
     const [historyDays, setHistoryDays] = useState<HistoryDaySummary[]>([]);
     const [historySamples, setHistorySamples] = useState<HistorySampleSummary[]>([]);
     const [nodeTimeZone, setNodeTimeZone] = useState("UTC");
@@ -1733,6 +1781,27 @@ export const Application = () => {
                 return DEFAULT_VISIBLE_SECTIONS;
             }
         });
+
+    /*
+     * Load the static PCI vendor lookup once.
+     * This resolves PCI Vendor/Subsystem IDs to friendly manufacturer names.
+     * Importing the JSON directly keeps it inside the built package so the
+     * frontend does not depend on a separate runtime fetch path.
+     */
+    useEffect(() => {
+        const nextLookup: Record<string, string> = {};
+
+        for (const entry of (Array.isArray(pciVendorEntries) ? pciVendorEntries : []) as PciVendorEntry[]) {
+            const vendor = (entry.vendor || "").trim().toLowerCase();
+            const vendorName = normalizePciVendorName(entry.vendor_name || "");
+
+            if (vendor.match(/^[0-9a-f]{4}$/) && vendorName) {
+                nextLookup[vendor] = vendorName;
+            }
+        }
+
+        setPciVendorLookup(nextLookup);
+    }, []);
 
     /*
      * Fast live refresh loop for current sensor data only.
@@ -1927,6 +1996,12 @@ export const Application = () => {
         selectedDaySamples.find(sample => sample.sampleKey === selectedHistorySampleKey) ||
         selectedDaySamples[0] ||
         null;
+    const nvmeManufacturer = (() => {
+        if (monitor.boot.nvmePresent !== "Yes") return "Not Available";
+        if (!monitor.nvme.pciVendorCode) return "Not Reported";
+
+        return pciVendorLookup[monitor.nvme.pciVendorCode] || `Unknown Vendor (${monitor.nvme.pciVendorCode.toUpperCase()})`;
+    })();
 
     /*
      * Render the full Cockpit page layout and all enabled monitor sections.
@@ -2058,20 +2133,18 @@ export const Application = () => {
                                     {showFanCard && (
                                         <Card isCompact className={getFanRpmStatusClass(monitor.thermal.fanRpm)}>
                                             <CardBody>
-                                                <Flex justifyContent={{ default: "justifyContentSpaceBetween" }}>
-                                                    <FlexItem>
-                                                        <Title headingLevel="h4" size="md" className="pi-card-label" style={{ marginLeft: "0.5rem" }}>Fan RPM</Title>
+                                                <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} alignItems={{ default: "alignItemsStretch" }}>
+                                                    <FlexItem flex={{ default: "flex_1" }}>
+                                                        <div style={{ textAlign: "center" }}>
+                                                            <Title headingLevel="h4" size="md" className="pi-card-label">Fan RPM</Title>
+                                                            <Title headingLevel="h4">{monitor.thermal.fanRpm}</Title>
+                                                        </div>
                                                     </FlexItem>
-                                                    <FlexItem style={{ marginRight: "0.5rem" }}>
-                                                        <Title headingLevel="h4" size="md" className="pi-card-label">Power Level</Title>
-                                                    </FlexItem>
-                                                </Flex>
-                                                <Flex justifyContent={{ default: "justifyContentSpaceBetween" }}>
-                                                    <FlexItem>
-                                                        <Title headingLevel="h4" style={{ marginLeft: "1.5rem" }}>{monitor.thermal.fanRpm}</Title>
-                                                    </FlexItem>
-                                                    <FlexItem>
-                                                        <Title headingLevel="h4" style={{ marginRight: "2rem" }}>{monitor.thermal.fanPwm}</Title>
+                                                    <FlexItem flex={{ default: "flex_1" }}>
+                                                        <div style={{ textAlign: "center" }}>
+                                                            <Title headingLevel="h4" size="md" className="pi-card-label">Power Level</Title>
+                                                            <Title headingLevel="h4">{monitor.thermal.fanPwm}</Title>
+                                                        </div>
                                                     </FlexItem>
                                                 </Flex>
                                             </CardBody>
@@ -2092,33 +2165,49 @@ export const Application = () => {
                                 </Content>
                                 <Gallery hasGutter minWidths={{ default: "220px" }}>
                                     <Card isCompact>
-                                        <CardBody>
+                                        <CardBody className="pi-metric-card-body pi-dual-metric-card">
                                             <Title headingLevel="h4" size="md" className="pi-card-label">CPU Temp Range</Title>
-                                            <Title headingLevel="h3">{monitor.history.cpuTempLow}<span style={{ marginLeft: "0.3rem" }}>Lows</span></Title>
-                                            <Title headingLevel="h3">{monitor.history.cpuTempHigh}<span style={{ marginLeft: "0.3rem" }}>Highs</span></Title>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.cpuTempLow}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Lows</span></Title>
+                                            </div>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.cpuTempHigh}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Highs</span></Title>
+                                            </div>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
-                                        <CardBody>
+                                        <CardBody className="pi-metric-card-body pi-dual-metric-card">
                                             <Title headingLevel="h4" size="md" className="pi-card-label">I/O Temp Range</Title>
-                                            <Title headingLevel="h3">{monitor.history.ioTempLow}<span style={{ marginLeft: "0.3rem" }}>Lows</span></Title>
-                                            <Title headingLevel="h3">{monitor.history.ioTempHigh}<span style={{ marginLeft: "0.3rem" }}>Highs</span></Title>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.ioTempLow}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Lows</span></Title>
+                                            </div>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.ioTempHigh}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Highs</span></Title>
+                                            </div>
                                         </CardBody>
                                     </Card>
                                     {showNvmeDependentItems && monitor.history.nvmeTempLow !== "--" && (
                                         <Card isCompact>
-                                            <CardBody>
+                                            <CardBody className="pi-metric-card-body pi-dual-metric-card">
                                                 <Title headingLevel="h4" size="md" className="pi-card-label">NVMe Temp Range</Title>
-                                                <Title headingLevel="h3">{monitor.history.nvmeTempLow}<span style={{ marginLeft: "0.3rem" }}>Lows</span></Title>
-                                                <Title headingLevel="h3">{monitor.history.nvmeTempHigh}<span style={{ marginLeft: "0.3rem" }}>Highs</span></Title>
+                                                <div className="pi-dual-metric-section">
+                                                    <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.nvmeTempLow}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Lows</span></Title>
+                                                </div>
+                                                <div className="pi-dual-metric-section">
+                                                    <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.nvmeTempHigh}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Highs</span></Title>
+                                                </div>
                                             </CardBody>
                                         </Card>
                                     )}
                                     <Card isCompact>
-                                        <CardBody>
+                                        <CardBody className="pi-metric-card-body pi-dual-metric-card">
                                             <Title headingLevel="h4" size="md" className="pi-card-label">Power Chip Temp Range</Title>
-                                            <Title headingLevel="h3">{monitor.history.pmicTempLow}<span style={{ marginLeft: "0.3rem" }}>Lows</span></Title>
-                                            <Title headingLevel="h3">{monitor.history.pmicTempHigh}<span style={{ marginLeft: "0.3rem" }}>Highs</span></Title>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.pmicTempLow}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Lows</span></Title>
+                                            </div>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h3" className="pi-metric-value pi-range-line"><span className="pi-range-value">{monitor.history.pmicTempHigh}</span><span className="pi-inline-metric-label">&nbsp;&nbsp;Highs</span></Title>
+                                            </div>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
@@ -2138,10 +2227,10 @@ export const Application = () => {
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
-                                        <CardBody>
+                                        <CardBody className="pi-metric-card-body">
                                             <Title headingLevel="h4" size="md" className="pi-card-label">Sample Span</Title>
-                                            <Title headingLevel="h3">{monitor.history.windowDays}</Title>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">Latest sample {monitor.history.latestSampleAge}</Title>
+                                            <Title headingLevel="h3" className="pi-metric-value">{monitor.history.windowDays}</Title>
+                                            <Content component={ContentVariants.small} className="pi-metric-detail">Latest sample {monitor.history.latestSampleAge}</Content>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
@@ -2299,10 +2388,10 @@ export const Application = () => {
                                                 </CardBody>
                                             </Card>
                                             <Card isCompact>
-                                                <CardBody>
+                                                <CardBody className="pi-metric-card-body">
                                                     <Title headingLevel="h4" size="md" className="pi-card-label">Sample Span</Title>
-                                                    <Title headingLevel="h3">{selectedHistoryDay.windowDays}</Title><br />
-                                                    <Title headingLevel="h4" size="md" className="pi-card-label">Latest sample {selectedHistoryDay.latestSampleAge}</Title>
+                                                    <Title headingLevel="h3" className="pi-metric-value">{selectedHistoryDay.windowDays}</Title>
+                                                    <Content component={ContentVariants.small} className="pi-metric-detail">Latest sample {selectedHistoryDay.latestSampleAge}</Content>
                                                 </CardBody>
                                             </Card>
                                             <Card isCompact>
@@ -2372,12 +2461,12 @@ export const Application = () => {
                                 </Content>
                                 <Gallery hasGutter minWidths={{ default: "220px" }}>
                                     <Card isCompact>
-                                        <CardBody>
+                                        <CardBody className="pi-metric-card-body">
                                             <Title headingLevel="h4" size="md" className="pi-card-label">Power Health</Title>
-                                            <Title headingLevel="h3" className={getPowerHealthTextClass(monitor.power.powerHealth)}>
+                                            <Title headingLevel="h3" className={`pi-metric-value ${getPowerHealthTextClass(monitor.power.powerHealth)}`}>
                                                 {monitor.power.powerHealth}
                                             </Title>
-                                            <Content component={ContentVariants.small}>{monitor.power.rawText}</Content>
+                                            <Content component={ContentVariants.small} className="pi-metric-detail">{monitor.power.rawText}</Content>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
@@ -2570,9 +2659,15 @@ export const Application = () => {
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
-                                        <CardBody>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">Model</Title>
-                                            <Title headingLevel="h3">{monitor.nvme.model}</Title>
+                                        <CardBody className="pi-metric-card-body pi-dual-metric-card">
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h4" size="md" className="pi-card-label">Manufacturer</Title>
+                                                <Title headingLevel="h3" className="pi-metric-value">{nvmeManufacturer}</Title>
+                                            </div>
+                                            <div className="pi-dual-metric-section">
+                                                <Title headingLevel="h4" size="md" className="pi-card-label">Model</Title>
+                                                <Title headingLevel="h3" className="pi-metric-value">{monitor.nvme.model}</Title>
+                                            </div>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
@@ -2582,10 +2677,10 @@ export const Application = () => {
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
-                                        <CardBody>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">Health</Title>
-                                            <Title headingLevel="h3">{monitor.nvme.health}</Title>
-                                            <Content component={ContentVariants.small}>{monitor.nvme.healthDetail}</Content>
+                                        <CardBody className="pi-metric-card-body">
+                                            <Title headingLevel="h4" size="md" className="pi-card-label">Drive Health</Title>
+                                            <Title headingLevel="h3" className="pi-metric-value">{monitor.nvme.health}</Title>
+                                            <Content component={ContentVariants.small} className="pi-metric-detail">{monitor.nvme.healthDetail}</Content>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
@@ -2898,15 +2993,15 @@ export const Application = () => {
                                     </Card>
                                     <Card isCompact>
                                         <CardBody>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">Ring Oscillator</Title>
+                                            <Title headingLevel="h4" className="pi-card-label">Ring Oscillator</Title>
                                             <Title headingLevel="h3">{monitor.advanced.ringOscillator}</Title>
                                         </CardBody>
                                     </Card>
                                     <Card isCompact>
-                                        <CardBody>
-                                            <Title headingLevel="h4" size="md" className="pi-card-label">Core Rail Power</Title>
+                                        <CardBody className="pi-metric-card-body">
+                                            <Title headingLevel="h4" className="pi-card-label">Core Rail Power</Title>
                                             <Title headingLevel="h3">{monitor.advanced.coreRailPower}</Title>
-                                            <Content component={ContentVariants.small}>{monitor.advanced.coreRailDetail}</Content>
+                                            <Content component={ContentVariants.small} className="pi-metric-detail">{monitor.advanced.coreRailDetail}</Content>
                                         </CardBody>
                                     </Card>
                                 </Gallery>
