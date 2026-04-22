@@ -1082,6 +1082,544 @@ async function readHistoryView(): Promise<{
     };
 }
 
+type MonitorPatch = {
+    thermal?: Partial<ThermalState>;
+    power?: Partial<PowerState>;
+    system?: Partial<SystemState>;
+    boot?: Partial<BootState>;
+    nvme?: Partial<NvmeState>;
+    sd?: Partial<SdState>;
+    usbStorage?: Partial<UsbStorageState>;
+    pcie?: Partial<PcieState>;
+    psu?: Partial<PsuState>;
+    voltages?: Partial<VoltageState>;
+    clocks?: Partial<ClockState>;
+    advanced?: Partial<AdvancedState>;
+    history?: Partial<HistorySummaryState>;
+};
+
+function mergeMonitorState(prev: MonitorState, patch: MonitorPatch): MonitorState {
+    return {
+        thermal: { ...prev.thermal, ...patch.thermal },
+        power: { ...prev.power, ...patch.power },
+        system: { ...prev.system, ...patch.system },
+        boot: { ...prev.boot, ...patch.boot },
+        nvme: { ...prev.nvme, ...patch.nvme },
+        sd: { ...prev.sd, ...patch.sd },
+        usbStorage: { ...prev.usbStorage, ...patch.usbStorage },
+        pcie: { ...prev.pcie, ...patch.pcie },
+        psu: { ...prev.psu, ...patch.psu },
+        voltages: { ...prev.voltages, ...patch.voltages },
+        clocks: { ...prev.clocks, ...patch.clocks },
+        advanced: { ...prev.advanced, ...patch.advanced },
+        history: { ...prev.history, ...patch.history },
+    };
+}
+
+function parseKeyValueOutput(out: string) {
+    const data: Record<string, string> = {};
+
+    for (const line of out.trim().split("\n")) {
+        const idx = line.indexOf("=");
+        if (idx > 0) {
+            data[line.slice(0, idx)] = line.slice(idx + 1).trim();
+        }
+    }
+
+    return data;
+}
+
+function parseKeyValueWithNvmeSmart(out: string) {
+    const data: Record<string, string> = {};
+    const lines = out.trim().split("\n");
+    let inNvmeSmart = false;
+    const nvmeSmartLines: string[] = [];
+
+    for (const line of lines) {
+        if (line === "NVME_SMART_BEGIN") {
+            inNvmeSmart = true;
+            continue;
+        }
+        if (line === "NVME_SMART_END") {
+            inNvmeSmart = false;
+            continue;
+        }
+
+        if (inNvmeSmart) {
+            nvmeSmartLines.push(line);
+            continue;
+        }
+
+        const idx = line.indexOf("=");
+        if (idx > 0) {
+            data[line.slice(0, idx)] = line.slice(idx + 1).trim();
+        }
+    }
+
+    return { data, nvmeSmartRaw: nvmeSmartLines.join("\n") };
+}
+
+async function readThermalPatch(): Promise<MonitorPatch> {
+    const cmd = `
+      CPU_HWMON=$(for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+        [ -r "$HWMON_DIR/name" ] || continue
+        HWMON_NAME=$(cat "$HWMON_DIR/name" 2>/dev/null || true)
+        if [ "$HWMON_NAME" = "cpu_thermal" ]; then
+          echo "$HWMON_DIR"
+          break
+        fi
+      done)
+
+      RP1_HWMON=$(for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+        [ -r "$HWMON_DIR/name" ] || continue
+        HWMON_NAME=$(cat "$HWMON_DIR/name" 2>/dev/null || true)
+        if [ "$HWMON_NAME" = "rp1_adc" ]; then
+          echo "$HWMON_DIR"
+          break
+        fi
+      done)
+
+      if [ -n "$CPU_HWMON" ] && [ -r "$CPU_HWMON/temp1_input" ]; then
+        echo "CPU=$(cat "$CPU_HWMON/temp1_input" 2>/dev/null)"
+      fi
+
+      if [ -n "$RP1_HWMON" ] && [ -r "$RP1_HWMON/temp1_input" ]; then
+        echo "RP1=$(cat "$RP1_HWMON/temp1_input" 2>/dev/null)"
+      fi
+
+      echo "PMIC_TEMP=$(vcgencmd measure_temp pmic 2>/dev/null | sed "s/.*=//; s/'C//" | awk '{printf "%d", $1 * 1000}')"
+
+      FAN_VALUE=""
+      PWM_VALUE=""
+      FAN_FOUND=0
+      PWM_FOUND=0
+
+      if [ -r /sys/devices/platform/cooling_fan/hwmon/hwmon3/fan1_input ]; then
+        FAN_VALUE=$(cat /sys/devices/platform/cooling_fan/hwmon/hwmon3/fan1_input 2>/dev/null || true)
+        [ -n "$FAN_VALUE" ] && FAN_FOUND=1
+      fi
+
+      if [ -r /sys/devices/platform/cooling_fan/hwmon/hwmon3/pwm1 ]; then
+        PWM_VALUE=$(cat /sys/devices/platform/cooling_fan/hwmon/hwmon3/pwm1 2>/dev/null || true)
+        [ -n "$PWM_VALUE" ] && PWM_FOUND=1
+      fi
+
+      if [ "$FAN_FOUND" -eq 0 ] || [ "$PWM_FOUND" -eq 0 ]; then
+        for HWMON_DIR in /sys/class/hwmon/hwmon*; do
+          [ -d "$HWMON_DIR" ] || continue
+
+          if [ "$FAN_FOUND" -eq 0 ]; then
+            for FAN_PATH in "$HWMON_DIR"/fan*_input; do
+              [ -r "$FAN_PATH" ] || continue
+              FAN_VALUE=$(cat "$FAN_PATH" 2>/dev/null || true)
+              if [ -n "$FAN_VALUE" ]; then
+                FAN_FOUND=1
+                break
+              fi
+            done
+          fi
+
+          if [ "$PWM_FOUND" -eq 0 ]; then
+            for PWM_PATH in "$HWMON_DIR"/pwm[0-9]*; do
+              [ -r "$PWM_PATH" ] || continue
+              case "$PWM_PATH" in
+                *_enable) continue ;;
+              esac
+              PWM_VALUE=$(cat "$PWM_PATH" 2>/dev/null || true)
+              if [ -n "$PWM_VALUE" ]; then
+                PWM_FOUND=1
+                break
+              fi
+            done
+          fi
+
+          if [ "$FAN_FOUND" -eq 1 ] && [ "$PWM_FOUND" -eq 1 ]; then
+            break
+          fi
+        done
+      fi
+
+      [ "$FAN_FOUND" -eq 1 ] && echo "FAN=$FAN_VALUE"
+      [ "$PWM_FOUND" -eq 1 ] && echo "PWM=$PWM_VALUE"
+      [ "$FAN_FOUND" -eq 1 ] || [ "$PWM_FOUND" -eq 1 ] && echo "FAN_PRESENT=1"
+    `;
+
+    const out = await cockpit.spawn(["sh", "-c", cmd], { err: "out" });
+    const data = parseKeyValueOutput(out);
+
+    return {
+        thermal: {
+            cpuTemp: formatTemp(data.CPU || ""),
+            ioTemp: formatTemp(data.RP1 || ""),
+            pmicTemp: data.PMIC_TEMP ? formatTemp(data.PMIC_TEMP) : "--",
+            fanRpm: data.FAN ? formatRpm(data.FAN) : "--",
+            fanPwm: data.PWM ? formatPercentFromPwm(data.PWM) : "--",
+        },
+        boot: {
+            fanPresent: formatYesNoFromZeroOne(data.FAN_PRESENT || "0"),
+        },
+    };
+}
+
+async function readPowerVoltagePatch(): Promise<MonitorPatch> {
+    const cmd = `
+      echo "THROTTLED=$(vcgencmd get_throttled 2>/dev/null || echo throttled=0x0)"
+      echo "VOLT_CORE=$(vcgencmd measure_volts core 2>/dev/null)"
+      echo "VOLT_SDRAM_C=$(vcgencmd measure_volts sdram_c 2>/dev/null)"
+      echo "VOLT_SDRAM_I=$(vcgencmd measure_volts sdram_i 2>/dev/null)"
+      echo "VOLT_SDRAM_P=$(vcgencmd measure_volts sdram_p 2>/dev/null)"
+      echo "PMIC_CORE_V=$(vcgencmd pmic_read_adc VDD_CORE_V 2>/dev/null)"
+      echo "PMIC_CORE_A=$(vcgencmd pmic_read_adc VDD_CORE_A 2>/dev/null)"
+      echo "PMIC_EXT5V_V=$(vcgencmd pmic_read_adc EXT5V_V 2>/dev/null)"
+
+      if [ -r /proc/device-tree/chosen/power/max_current ]; then
+        echo "PSU_MAX_CURRENT_MA=$(od -A n -d -j 2 --endian=big /proc/device-tree/chosen/power/max_current 2>/dev/null | tr -d ' ')"
+      fi
+
+      if [ -r /proc/device-tree/chosen/power/usb_max_current_enable ]; then
+        echo "USB_MAX_CURRENT_ENABLE=$(od -A n -d -j 3 /proc/device-tree/chosen/power/usb_max_current_enable 2>/dev/null | tr -d ' ')"
+      fi
+
+      if [ -r /proc/device-tree/chosen/power/usb_over_current_detected ]; then
+        echo "USB_OVER_CURRENT_DETECTED=$(od -A n -d -j 3 /proc/device-tree/chosen/power/usb_over_current_detected 2>/dev/null | tr -d ' ')"
+      fi
+    `;
+
+    const out = await cockpit.spawn(["sh", "-c", cmd], { err: "out" });
+    const data = parseKeyValueOutput(out);
+    const throttled = parseThrottledHex(data.THROTTLED || "throttled=0x0");
+    const coreV = extractNumericValue(data.PMIC_CORE_V || "");
+    const coreA = extractNumericValue(data.PMIC_CORE_A || "");
+    const corePower = Number.isFinite(coreV) && Number.isFinite(coreA)
+        ? `${(coreV * coreA).toFixed(2)} W`
+        : "--";
+    const coreDetail = Number.isFinite(coreV) && Number.isFinite(coreA)
+        ? `${coreV.toFixed(4)} V × ${coreA.toFixed(4)} A`
+        : "--";
+
+    return {
+        power: throttled,
+        psu: {
+            inputVoltage: Number.isFinite(extractNumericValue(data.PMIC_EXT5V_V || ""))
+                ? `${extractNumericValue(data.PMIC_EXT5V_V || "").toFixed(4)} V`
+                : "--",
+            negotiatedCurrentLimit: formatMilliAmps(data.PSU_MAX_CURRENT_MA || ""),
+            usbCurrentLimitMode: formatUsbCurrentLimitMode(data.USB_MAX_CURRENT_ENABLE || ""),
+            usbOverCurrentAtBoot: formatYesNoFromZeroOne(data.USB_OVER_CURRENT_DETECTED || ""),
+        },
+        voltages: {
+            coreVoltage: extractValueAfterEquals(data.VOLT_CORE || ""),
+            sdramC: extractValueAfterEquals(data.VOLT_SDRAM_C || ""),
+            sdramI: extractValueAfterEquals(data.VOLT_SDRAM_I || ""),
+            sdramP: extractValueAfterEquals(data.VOLT_SDRAM_P || ""),
+        },
+        advanced: {
+            coreRailPower: corePower,
+            coreRailDetail: coreDetail,
+        },
+    };
+}
+
+async function readSystemActivityPatch(): Promise<MonitorPatch> {
+    const cmd = `
+      ROOT_DF_LINE=$(df -B1 / 2>/dev/null | awk 'NR==2 {print $3 "|" $2 "|" $5}')
+      if [ -n "$ROOT_DF_LINE" ]; then
+        echo "ROOTFS_USED_BYTES=$(printf '%s\n' "$ROOT_DF_LINE" | cut -d'|' -f1)"
+        echo "ROOTFS_TOTAL_BYTES=$(printf '%s\n' "$ROOT_DF_LINE" | cut -d'|' -f2)"
+        echo "ROOTFS_USED_PCT=$(printf '%s\n' "$ROOT_DF_LINE" | cut -d'|' -f3)"
+      fi
+
+      echo "UPTIME=$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+      echo "LOAD_AVG=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+      echo "MEMTOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)"
+      echo "MEMAVAILABLE_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+      echo "CPU_FREQ_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"
+      echo "CLOCK_ARM=$(vcgencmd measure_clock arm 2>/dev/null | awk -F= '{print $2}')"
+      echo "CLOCK_CORE=$(vcgencmd measure_clock core 2>/dev/null | awk -F= '{print $2}')"
+      echo "CLOCK_EMMC=$(vcgencmd measure_clock emmc 2>/dev/null | awk -F= '{print $2}')"
+    `;
+
+    const out = await cockpit.spawn(["sh", "-c", cmd], { err: "out" });
+    const data = parseKeyValueOutput(out);
+    const memTotalBytes = Number(data.MEMTOTAL_KB || 0) * 1024;
+    const memAvailableBytes = Number(data.MEMAVAILABLE_KB || 0) * 1024;
+    const memUsedBytes = Number.isFinite(memTotalBytes) && Number.isFinite(memAvailableBytes)
+        ? Math.max(0, memTotalBytes - memAvailableBytes)
+        : NaN;
+
+    return {
+        system: {
+            cpuFrequency: formatCpuFreq(data.CPU_FREQ_KHZ || ""),
+            totalRam: formatBytesGiB(memTotalBytes),
+            memoryUsage: formatMemUsage(memUsedBytes, memTotalBytes),
+            uptime: formatUptime(data.UPTIME || ""),
+            loadAverage: data.LOAD_AVG || "--",
+            rootFilesystemUsed: data.ROOTFS_USED_PCT || "--",
+        },
+        clocks: {
+            armClock: formatClock(data.CLOCK_ARM || ""),
+            coreClock: formatClock(data.CLOCK_CORE || ""),
+            emmcClock: formatClock(data.CLOCK_EMMC || ""),
+        },
+    };
+}
+
+async function readStoragePatch(): Promise<MonitorPatch> {
+    const cmd = `
+      ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null)
+      echo "ROOT_DEVICE=$ROOT_DEV"
+
+      [ -b /dev/nvme0n1 ] && echo "NVME_PRESENT=1"
+
+      if [ -b /dev/nvme0n1 ]; then
+        [ -r /sys/class/nvme/nvme0/model ] && echo "NVME_MODEL=$(cat /sys/class/nvme/nvme0/model 2>/dev/null)"
+        [ -r /sys/class/nvme/nvme0/firmware_rev ] && echo "NVME_FIRMWARE=$(cat /sys/class/nvme/nvme0/firmware_rev 2>/dev/null)"
+        [ -r /sys/class/block/nvme0n1/size ] && echo "NVME_SIZE_BYTES=$(awk '{print $1 * 512}' /sys/class/block/nvme0n1/size 2>/dev/null)"
+
+        NVME_PCI_VENDOR_ID=$(sudo -n smartctl -a /dev/nvme0n1 2>/dev/null | awk -F: '$1 == "PCI Vendor/Subsystem ID" {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        if [ -z "$NVME_PCI_VENDOR_ID" ]; then
+          NVME_PCI_VENDOR_ID=$(smartctl -a /dev/nvme0n1 2>/dev/null | awk -F: '$1 == "PCI Vendor/Subsystem ID" {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        fi
+        [ -n "$NVME_PCI_VENDOR_ID" ] && echo "NVME_PCI_VENDOR_ID=$NVME_PCI_VENDOR_ID"
+
+        NVME_MOUNT_DEV=$(findmnt -rn -o SOURCE | grep -E '^/dev/nvme0n1p[0-9]+$' | head -n1 || true)
+        if [ -n "$NVME_MOUNT_DEV" ]; then
+          NVME_MOUNT_POINT=$(findmnt -rn -S "$NVME_MOUNT_DEV" -o TARGET | head -n1 || true)
+          [ -n "$NVME_MOUNT_POINT" ] && echo "NVME_MOUNT_POINT=$NVME_MOUNT_POINT"
+        fi
+
+        echo "NVME_SMART_BEGIN"
+        sudo -n smartctl -a /dev/nvme0n1 || smartctl -a /dev/nvme0n1 || true
+        sudo -n nvme smart-log /dev/nvme0n1 || nvme smart-log /dev/nvme0n1 || true
+        echo "NVME_SMART_END"
+      fi
+
+      if [ -L /sys/class/nvme/nvme0/device ]; then
+        NVME_PCI_DEV=$(readlink -f /sys/class/nvme/nvme0/device 2>/dev/null || true)
+
+        if [ -n "$NVME_PCI_DEV" ] && [ -d "$NVME_PCI_DEV" ]; then
+          [ -r "$NVME_PCI_DEV/current_link_speed" ] && echo "PCIE_CURRENT_LINK_SPEED=$(cat "$NVME_PCI_DEV/current_link_speed" 2>/dev/null)"
+          [ -r "$NVME_PCI_DEV/current_link_width" ] && echo "PCIE_CURRENT_LINK_WIDTH=$(cat "$NVME_PCI_DEV/current_link_width" 2>/dev/null)"
+          [ -r "$NVME_PCI_DEV/max_link_speed" ] && echo "PCIE_MAX_LINK_SPEED=$(cat "$NVME_PCI_DEV/max_link_speed" 2>/dev/null)"
+          [ -r "$NVME_PCI_DEV/max_link_width" ] && echo "PCIE_MAX_LINK_WIDTH=$(cat "$NVME_PCI_DEV/max_link_width" 2>/dev/null)"
+        fi
+      fi
+
+      USB_STORAGE_DISK=""
+      USB_ROOT_DISK=""
+
+      case "$ROOT_DEV" in
+        /dev/sd[a-z][0-9]*)
+          USB_ROOT_DISK=$(printf '%s\n' "$ROOT_DEV" | sed -E 's#^/dev/(sd[a-z]+)[0-9]+$#\\1#')
+          ;;
+        /dev/sd[a-z])
+          USB_ROOT_DISK=$(printf '%s\n' "$ROOT_DEV" | sed -E 's#^/dev/(sd[a-z]+)$#\\1#')
+          ;;
+      esac
+
+      is_usb_storage_disk() {
+        DISK_NAME="$1"
+        DISK_DEVICE_PATH=$(readlink -f "/sys/class/block/$DISK_NAME/device" 2>/dev/null || true)
+        printf '%s\n' "$DISK_DEVICE_PATH" | grep -q '/usb'
+      }
+
+      if [ -n "$USB_ROOT_DISK" ] && is_usb_storage_disk "$USB_ROOT_DISK"; then
+        USB_STORAGE_DISK="$USB_ROOT_DISK"
+      else
+        for DISK_PATH in /sys/class/block/sd*; do
+          [ -e "$DISK_PATH" ] || continue
+          DISK_NAME=$(basename "$DISK_PATH")
+          if is_usb_storage_disk "$DISK_NAME"; then
+            USB_STORAGE_DISK="$DISK_NAME"
+            break
+          fi
+        done
+      fi
+
+      if [ -n "$USB_STORAGE_DISK" ]; then
+        echo "USB_STORAGE_PRESENT=1"
+        echo "USB_STORAGE_DEVICE=/dev/$USB_STORAGE_DISK"
+
+        if [ -r "/sys/class/block/$USB_STORAGE_DISK/device/model" ]; then
+          USB_STORAGE_MODEL=$(cat "/sys/class/block/$USB_STORAGE_DISK/device/model" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
+        [ -n "$USB_STORAGE_MODEL" ] && echo "USB_STORAGE_MODEL=$USB_STORAGE_MODEL"
+
+        if [ -r "/sys/class/block/$USB_STORAGE_DISK/size" ]; then
+          USB_STORAGE_SIZE_BYTES=$(awk '{print $1 * 512}' "/sys/class/block/$USB_STORAGE_DISK/size" 2>/dev/null)
+        fi
+        [ -n "$USB_STORAGE_SIZE_BYTES" ] && echo "USB_STORAGE_SIZE_BYTES=$USB_STORAGE_SIZE_BYTES"
+
+        USB_MOUNT_LINE=$(lsblk -nrpo NAME,MOUNTPOINT "/dev/$USB_STORAGE_DISK" 2>/dev/null | awk '$2 != "" {print $1 "|" $2; exit}')
+        if [ -n "$USB_MOUNT_LINE" ]; then
+          USB_STORAGE_MOUNT_DEVICE=$(printf '%s\n' "$USB_MOUNT_LINE" | cut -d'|' -f1)
+          USB_STORAGE_MOUNT_POINT=$(printf '%s\n' "$USB_MOUNT_LINE" | cut -d'|' -f2-)
+          [ -n "$USB_STORAGE_MOUNT_DEVICE" ] && echo "USB_STORAGE_MOUNT_DEVICE=$USB_STORAGE_MOUNT_DEVICE"
+          [ -n "$USB_STORAGE_MOUNT_POINT" ] && echo "USB_STORAGE_MOUNT_POINT=$USB_STORAGE_MOUNT_POINT"
+          if [ -n "$USB_STORAGE_MOUNT_POINT" ]; then
+            USB_STORAGE_FREE_BYTES=$(df -B1 "$USB_STORAGE_MOUNT_POINT" 2>/dev/null | awk 'NR==2 {print $4}')
+            [ -n "$USB_STORAGE_FREE_BYTES" ] && echo "USB_STORAGE_FREE_BYTES=$USB_STORAGE_FREE_BYTES"
+          fi
+        fi
+      fi
+
+      if [ -b /dev/mmcblk0 ]; then
+        echo "SD_PRESENT=1"
+        echo "SD_DEVICE=/dev/mmcblk0"
+        [ -r /sys/class/block/mmcblk0/size ] && echo "SD_SIZE_BYTES=$(awk '{print $1 * 512}' /sys/class/block/mmcblk0/size 2>/dev/null)"
+        [ -r /sys/class/block/mmcblk0/device/manfid ] && echo "SD_VENDOR=$(cat /sys/class/block/mmcblk0/device/manfid 2>/dev/null)"
+        [ -r /sys/class/block/mmcblk0/device/name ] && echo "SD_NAME=$(cat /sys/class/block/mmcblk0/device/name 2>/dev/null)"
+        [ -r /sys/class/block/mmcblk0/device/serial ] && echo "SD_SERIAL=$(cat /sys/class/block/mmcblk0/device/serial 2>/dev/null)"
+
+        SD_MOUNT_DEV=$(findmnt -rn -o SOURCE | grep -E '^/dev/mmcblk0p[0-9]+$' | head -n1 || true)
+        if [ -n "$SD_MOUNT_DEV" ]; then
+          SD_MOUNT_POINT=$(findmnt -rn -S "$SD_MOUNT_DEV" -o TARGET | head -n1 || true)
+          if [ -n "$SD_MOUNT_POINT" ]; then
+            echo "SD_MOUNT_DEVICE=$SD_MOUNT_DEV"
+            echo "SD_MOUNT_POINT=$SD_MOUNT_POINT"
+
+            SD_DF_LINE=$(df -B1 "$SD_MOUNT_POINT" 2>/dev/null | awk 'NR==2 {print $3 "|" $2 "|" $5}')
+            if [ -n "$SD_DF_LINE" ]; then
+              echo "SD_USED_BYTES=$(printf '%s\n' "$SD_DF_LINE" | cut -d'|' -f1)"
+              echo "SD_TOTAL_BYTES=$(printf '%s\n' "$SD_DF_LINE" | cut -d'|' -f2)"
+              echo "SD_USED_PCT=$(printf '%s\n' "$SD_DF_LINE" | cut -d'|' -f3)"
+            fi
+          fi
+        fi
+      fi
+    `;
+
+    const out = await cockpit.spawn(["sh", "-c", cmd], { err: "out" });
+    const { data, nvmeSmartRaw } = parseKeyValueWithNvmeSmart(out);
+    const nvmeHealth = parseSmartHealth(nvmeSmartRaw);
+    const nvmeSmartTemp = cleanNvmeTemp(parseSmartValue(
+        nvmeSmartRaw,
+        "Composite Temperature",
+        "Temperature",
+        "temperature",
+        "Current Drive Temperature",
+        "Temperature Sensor 1",
+        "temperature_sensor_1"
+    ));
+    const nvmePercentageUsed = formatSmartPercent(parseSmartValue(
+        nvmeSmartRaw,
+        "Percentage Used",
+        "percentage_used",
+        "Percentage Used Endurance Indicator",
+        "Endurance Used",
+        "endurance_used"
+    ));
+    const nvmePowerOnHours = formatHours(parseSmartValue(
+        nvmeSmartRaw,
+        "Power On Hours",
+        "Power-On Hours",
+        "power_on_hours",
+        "Power on Hours"
+    ));
+    const nvmeUnsafeShutdowns = formatNvmeCounter(parseSmartValue(
+        nvmeSmartRaw,
+        "Unsafe Shutdowns",
+        "unsafe_shutdowns",
+        "Unsafe Shutdown Count"
+    ));
+    const nvmeMediaErrors = formatNvmeCounter(parseSmartValue(
+        nvmeSmartRaw,
+        "Media and Data Integrity Errors",
+        "media_errors",
+        "Media Errors"
+    ));
+    const nvmePresent = formatYesNoFromZeroOne(data.NVME_PRESENT || "0");
+    const nvmePermissionRequired =
+        detectPermissionIssue(nvmeSmartRaw) &&
+        nvmeHealth === "--" &&
+        nvmeSmartTemp === "--" &&
+        nvmePowerOnHours === "--" &&
+        nvmeUnsafeShutdowns === "--" &&
+        nvmeMediaErrors === "--" &&
+        nvmePercentageUsed === "--";
+
+    return {
+        thermal: {
+            nvmeTemp: nvmePresent === "Yes" ? nvmeSmartTemp : "--",
+        },
+        boot: {
+            rootDevice: data.ROOT_DEVICE || "--",
+            bootDevice: classifyBootDevice(data.ROOT_DEVICE || "--"),
+            nvmePresent,
+        },
+        nvme: {
+            pciVendorCode: parsePciVendorCode(data.NVME_PCI_VENDOR_ID || ""),
+            model: displayStorageHardwareField(data.NVME_MODEL, nvmePresent),
+            capacity: displayStorageHardwareField(formatBytesDecimal(data.NVME_SIZE_BYTES || ""), nvmePresent),
+            firmware: displayStorageHardwareField(data.NVME_FIRMWARE, nvmePresent),
+            health: displayNvmeSmartField(nvmeHealth, nvmePresent, nvmePermissionRequired),
+            healthDetail: nvmePermissionRequired
+                ? "Permission Required"
+                : (nvmeHealth !== "--" ? "Current SMART Status" : "Not Reported"),
+            smartTemp: displayNvmeSmartField(nvmeSmartTemp, nvmePresent, nvmePermissionRequired),
+            percentageUsed: (() => {
+                if (nvmePresent !== "Yes") return "Not Available";
+                if (nvmePermissionRequired) return "Permission Required";
+                if (isBlank(nvmePercentageUsed)) return "Not Reported";
+                return nvmePercentageUsed;
+            })(),
+            powerOnHours: displayNvmeSmartField(nvmePowerOnHours, nvmePresent, nvmePermissionRequired),
+            unsafeShutdowns: displayNvmeSmartField(nvmeUnsafeShutdowns, nvmePresent, nvmePermissionRequired),
+            mediaErrors: displayNvmeSmartField(nvmeMediaErrors, nvmePresent, nvmePermissionRequired),
+            mountedAt: displayStorageMount(data.NVME_MOUNT_POINT, nvmePresent),
+        },
+        sd: {
+            present: formatYesNoFromZeroOne(data.SD_PRESENT || "0"),
+            device: displayStorageHardwareField(data.SD_MOUNT_DEVICE || data.SD_DEVICE, formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            capacity: displayStorageHardwareField(formatBytesDecimal(data.SD_SIZE_BYTES || ""), formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            cardUsed: displayStorageFsField(data.SD_USED_PCT, data.SD_MOUNT_POINT, formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            vendor: displayStorageHardwareField(decodeSdVendor(data.SD_VENDOR || ""), formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            name: displayStorageHardwareField(data.SD_NAME, formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            serial: displayStorageHardwareField(data.SD_SERIAL, formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+            mountedAt: displayStorageMount(data.SD_MOUNT_POINT, formatYesNoFromZeroOne(data.SD_PRESENT || "0")),
+        },
+        usbStorage: {
+            present: formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0"),
+            model: displayStorageHardwareField(data.USB_STORAGE_MODEL, formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0")),
+            capacity: displayStorageHardwareField(formatBytesDecimal(data.USB_STORAGE_SIZE_BYTES || ""), formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0")),
+            freeSpace: displayStorageFsField(formatBytesDecimal(data.USB_STORAGE_FREE_BYTES || ""), data.USB_STORAGE_MOUNT_POINT, formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0")),
+            devicePath: displayStorageHardwareField(data.USB_STORAGE_DEVICE, formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0")),
+            mountedAt: displayStorageMount(data.USB_STORAGE_MOUNT_POINT, formatYesNoFromZeroOne(data.USB_STORAGE_PRESENT || "0")),
+        },
+        pcie: {
+            currentLinkSpeed: data.PCIE_CURRENT_LINK_SPEED || "--",
+            currentLinkWidth: data.PCIE_CURRENT_LINK_WIDTH ? `x${data.PCIE_CURRENT_LINK_WIDTH}` : "--",
+            maxLinkSpeed: data.PCIE_MAX_LINK_SPEED || "--",
+            maxLinkWidth: data.PCIE_MAX_LINK_WIDTH ? `x${data.PCIE_MAX_LINK_WIDTH}` : "--",
+        },
+    };
+}
+
+async function readStaticIdentityPatch(): Promise<MonitorPatch> {
+    const cmd = `
+      echo "PI_MODEL=$(tr -d '\0' </proc/device-tree/model 2>/dev/null)"
+      echo "KERNEL=$(uname -r 2>/dev/null)"
+      echo "VCGEN_VERSION=$(vcgencmd version 2>/dev/null | head -n1)"
+      echo "RING_OSC=$(vcgencmd read_ring_osc 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g' | sed 's/[[:space:]]*$//')"
+      echo "MEMTOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)"
+    `;
+
+    const out = await cockpit.spawn(["sh", "-c", cmd], { err: "out" });
+    const data = parseKeyValueOutput(out);
+
+    return {
+        system: {
+            piModel: data.PI_MODEL || "--",
+            kernel: data.KERNEL || "--",
+            totalRam: formatBytesGiB(Number(data.MEMTOTAL_KB || 0) * 1024),
+        },
+        advanced: {
+            firmwareVersion: data.VCGEN_VERSION || "--",
+            ringOscillator: formatRingOsc(data.RING_OSC || ""),
+        },
+    };
+}
+
 /*
  * Live monitor defaults and live-data reader.
  * These provide safe placeholder values until the node responds.
@@ -1804,13 +2342,40 @@ export const Application = () => {
     }, []);
 
     /*
-     * Fast live refresh loop for current sensor data only.
-     * Keeps the live cards responsive and tracks live online/offline state
-     * without waiting on history reads.
+     * Initial full snapshot so the page fills quickly before the staggered loops take over.
      */
     useEffect(() => {
         let cancelled = false;
-        let lastSnapshot = "";
+
+        const bootstrap = async () => {
+            try {
+                const data = await readMonitorData();
+                if (cancelled) return;
+
+                setMonitor(prev => ({
+                    ...data,
+                    history: prev.history,
+                }));
+                setLiveDataOnline(true);
+            } catch {
+                if (!cancelled) {
+                    setLiveDataOnline(false);
+                }
+            }
+        };
+
+        bootstrap().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    /*
+     * Fast live thermal loop for temperatures and fan telemetry.
+     */
+    useEffect(() => {
+        let cancelled = false;
         let stallTimer: number | undefined;
         let refreshTimer: number | undefined;
 
@@ -1826,7 +2391,7 @@ export const Application = () => {
                 if (!cancelled) {
                     setLiveDataOnline(false);
                 }
-            }, 5000);
+            }, 3000);
         };
 
         const scheduleRefresh = (delayMs: number) => {
@@ -1839,26 +2404,17 @@ export const Application = () => {
 
         const refreshLoop = async (): Promise<void> => {
             try {
-                const data = await readMonitorData();
+                const patch = await readThermalPatch();
                 if (cancelled) return;
 
-                const snapshot = JSON.stringify(data);
-
-                if (snapshot !== lastSnapshot) {
-                    lastSnapshot = snapshot;
-                    setMonitor(prev => ({
-                        ...data,
-                        history: prev.history,
-                    }));
-                }
-
+                setMonitor(prev => mergeMonitorState(prev, patch));
                 markOnline();
-                scheduleRefresh(250);
+                scheduleRefresh(1000);
             } catch {
                 if (cancelled) return;
 
                 setLiveDataOnline(false);
-                scheduleRefresh(1000);
+                scheduleRefresh(1500);
             }
         };
 
@@ -1876,8 +2432,163 @@ export const Application = () => {
     }, []);
 
     /*
+     * Power, voltage, and core-rail values update on a medium cadence.
+     */
+    useEffect(() => {
+        let cancelled = false;
+        let refreshTimer: number | undefined;
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshLoop().catch(() => undefined);
+                }
+            }, delayMs);
+        };
+
+        const refreshLoop = async (): Promise<void> => {
+            try {
+                const patch = await readPowerVoltagePatch();
+                if (cancelled) return;
+
+                setMonitor(prev => mergeMonitorState(prev, patch));
+                scheduleRefresh(3000);
+            } catch {
+                if (cancelled) return;
+
+                scheduleRefresh(5000);
+            }
+        };
+
+        refreshLoop().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
+            }
+        };
+    }, []);
+
+    /*
+     * General system activity values update more slowly than live thermal data.
+     */
+    useEffect(() => {
+        let cancelled = false;
+        let refreshTimer: number | undefined;
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshLoop().catch(() => undefined);
+                }
+            }, delayMs);
+        };
+
+        const refreshLoop = async (): Promise<void> => {
+            try {
+                const patch = await readSystemActivityPatch();
+                if (cancelled) return;
+
+                setMonitor(prev => mergeMonitorState(prev, patch));
+                scheduleRefresh(10000);
+            } catch {
+                if (cancelled) return;
+
+                scheduleRefresh(15000);
+            }
+        };
+
+        refreshLoop().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
+            }
+        };
+    }, []);
+
+    /*
+     * Storage, SMART, and PCIe-related data update on a slower cadence.
+     */
+    useEffect(() => {
+        let cancelled = false;
+        let refreshTimer: number | undefined;
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshLoop().catch(() => undefined);
+                }
+            }, delayMs);
+        };
+
+        const refreshLoop = async (): Promise<void> => {
+            try {
+                const patch = await readStoragePatch();
+                if (cancelled) return;
+
+                setMonitor(prev => mergeMonitorState(prev, patch));
+                scheduleRefresh(30000);
+            } catch {
+                if (cancelled) return;
+
+                scheduleRefresh(45000);
+            }
+        };
+
+        refreshLoop().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
+            }
+        };
+    }, []);
+
+    /*
+     * Static identity values refresh rarely.
+     */
+    useEffect(() => {
+        let cancelled = false;
+        let refreshTimer: number | undefined;
+
+        const scheduleRefresh = (delayMs: number) => {
+            refreshTimer = window.setTimeout(() => {
+                if (!cancelled) {
+                    refreshLoop().catch(() => undefined);
+                }
+            }, delayMs);
+        };
+
+        const refreshLoop = async (): Promise<void> => {
+            try {
+                const patch = await readStaticIdentityPatch();
+                if (cancelled) return;
+
+                setMonitor(prev => mergeMonitorState(prev, patch));
+                scheduleRefresh(3600000);
+            } catch {
+                if (cancelled) return;
+
+                scheduleRefresh(900000);
+            }
+        };
+
+        refreshLoop().catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            if (refreshTimer !== undefined) {
+                window.clearTimeout(refreshTimer);
+            }
+        };
+    }, []);
+
+    /*
      * Slower history refresh loop for NDJSON summaries and selections.
-     * This avoids repeated history file reads on the fast live sensor loop.
      */
     useEffect(() => {
         let cancelled = false;
@@ -1901,8 +2612,7 @@ export const Application = () => {
 
                 if (snapshot !== lastSnapshot) {
                     lastSnapshot = snapshot;
-                    setMonitor(prev => ({
-                        ...prev,
+                    setMonitor(prev => mergeMonitorState(prev, {
                         history: historyView.summary,
                     }));
                     setHistoryDays(historyView.days);
@@ -1920,11 +2630,11 @@ export const Application = () => {
                     });
                 }
 
-                scheduleRefresh(30000);
+                scheduleRefresh(300000);
             } catch {
                 if (cancelled) return;
 
-                scheduleRefresh(30000);
+                scheduleRefresh(300000);
             }
         };
 
