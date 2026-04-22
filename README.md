@@ -40,6 +40,7 @@ sudo ./install.sh
 
 ```bash
 sudo systemctl disable --now pi-monitor-history.timer
+sudo systemctl disable --now pi-monitor-history.service 2>/dev/null || true
 sudo rm -rf /usr/local/share/cockpit/pi-monitor
 sudo rm -f /usr/local/bin/pi-monitor-history
 sudo rm -f /etc/systemd/system/pi-monitor-history.service
